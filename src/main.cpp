@@ -190,7 +190,7 @@ int main() {
 
     // Display total statistics
     analyzer.printStats();
-    //analyzer.printTopKMessages(3);
+    analyzer.printTopKMessages(3);
 
     // 2. Ask user for a search term
     string searchTerm;
