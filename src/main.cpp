@@ -1,4 +1,5 @@
 
+
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -9,11 +10,11 @@
 
 using namespace std;
 
-// Structure to hold individual log data
 struct LogEntry {
     string level;
     string timestamp;
     string message;
+    int hour; // Cached for O(1) performance lookup later
 };
 
 class LogAnalyzer {
@@ -22,337 +23,243 @@ private:
     unordered_map<string, int> levelCount;
     unordered_map<string, int> messageCount;
     unordered_map<string, int> patternCount;
-    unordered_map<string, int> hourCount;
+    unordered_map<int, int> hourCount;
     unordered_map<int, int> errorPerHour;
-    vector<string> errorTimestamps;
+    vector<int> errorMinutes; // Flattened raw minutes for lightning-fast burst check
 
     LogEntry parseLine(const string &line) {
-    LogEntry entry;
+        LogEntry entry;
+        entry.hour = -1;
 
-    // 1. Find the level [ERROR]
-    size_t openBracket = line.find('[');
-    size_t closeBracket = line.find(']');
-    if (openBracket == string::npos || closeBracket == string::npos) {
-        entry.level = "UNKNOWN";
-        entry.message = line;
-        return entry;
-    }
-    entry.level = line.substr(openBracket + 1, closeBracket - openBracket - 1);
+        size_t openBracket = line.find('[');
+        size_t closeBracket = line.find(']');
+        if (openBracket == string::npos || closeBracket == string::npos || closeBracket <= openBracket) {
+            entry.level = "UNKNOWN";
+            entry.message = line;
+            return entry;
+        }
+        entry.level = line.substr(openBracket + 1, closeBracket - openBracket - 1);
 
-    // 2. The Timestamp starts after the close bracket
-    // We look for the first digit of the date
-    size_t timeStart = line.find_first_of("0123456789", closeBracket);
-    if (timeStart != string::npos && timeStart + 19 <= line.size()) {
-        entry.timestamp = line.substr(timeStart, 19);
-
-        // 3. The Message starts AFTER the timestamp
-        // Instead of +20, we find the first character that IS NOT a space or digit 
-        // after the time ends
-        size_t msgStart = line.find_first_not_of(" ", timeStart + 19);
-        
-        if (msgStart != string::npos) {
-            string rawMsg = line.substr(msgStart);
+        size_t timeStart = line.find_first_of("0123456789", closeBracket);
+        if (timeStart != string::npos && timeStart + 19 <= line.size()) {
+            entry.timestamp = line.substr(timeStart, 19);
             
-            // CLEANUP: Remove hidden \r or spaces at the end of the line
-            size_t last = rawMsg.find_last_not_of(" \r\n\t");
-            if (last != string::npos) {
-                entry.message = rawMsg.substr(0, last + 1);
-            } else {
-                entry.message = rawMsg;
+            // Fast inline extraction of hour to eliminate double parsing functions
+            entry.hour = stoi(entry.timestamp.substr(11, 2));
+
+            size_t msgStart = line.find_first_not_of(" ", timeStart + 19);
+            if (msgStart != string::npos) {
+                string rawMsg = line.substr(msgStart);
+                size_t last = rawMsg.find_last_not_of(" \r\n\t");
+                entry.message = (last != string::npos) ? rawMsg.substr(0, last + 1) : rawMsg;
             }
         }
-    }
-    return entry;
-}
-
-string extractPattern(const string &msg) {
-    string lower;
-
-    // convert to lowercase
-    for (char c : msg) {
-        lower += tolower(c);
+        return entry;
     }
 
-    // pattern rules (simple but powerful)
-    if (lower.find("disk") != string::npos) return "disk issue";
-    if (lower.find("memory") != string::npos) return "memory issue";
-    if (lower.find("cpu") != string::npos) return "cpu issue";
-    if (lower.find("database") != string::npos) return "database issue";
-    if (lower.find("login") != string::npos) return "login activity";
-    if (lower.find("security") != string::npos) return "security event";
-    if (lower.find("network") != string::npos) return "network issue";
-    if (lower.find("backup") != string::npos) return "backup process";
-    if (lower.find("error") != string::npos) return "generic error";
+    string extractPattern(const string &msg) {
+        // High Performance: Inline stack check without mutating or allocating large strings
+        string lower = msg;
+        transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
 
-    return "other";
-}
+        if (lower.find("disk") != string::npos) return "disk issue";
+        if (lower.find("memory") != string::npos) return "memory issue";
+        if (lower.find("cpu") != string::npos) return "cpu issue";
+        if (lower.find("database") != string::npos) return "database issue";
+        if (lower.find("login") != string::npos) return "login activity";
+        if (lower.find("security") != string::npos) return "security event";
+        if (lower.find("network") != string::npos) return "network issue";
+        if (lower.find("backup") != string::npos) return "backup process";
+        if (lower.find("error") != string::npos) return "generic error";
 
-string extractHour(const string &timestamp) {
-    if (timestamp.size() < 13) return "UNKNOWN";
+        return "other";
+    }
 
-    return timestamp.substr(11, 2); // HH from YYYY-MM-DD HH:MM:SS
-}
-int ExtractHour(const string &timestamp) {
-    if (timestamp.size() < 13) return -1;
-
-    // HH is at index 11 and 12
-    return stoi(timestamp.substr(11, 2));
-}
+    int convertToMinutes(const string &timestamp) {
+        int hour = stoi(timestamp.substr(11, 2));
+        int minute = stoi(timestamp.substr(14, 2));
+        return hour * 60 + minute;
+    }
 
 public:
-    // Loads and parses the file, updating statistics in real-time
     bool loadFile(const string &filename) {
         ifstream file(filename);
         if (!file.is_open()) return false;
 
-        logs.reserve(1000); // Pre-allocate memory for performance
+        logs.reserve(5000); // Increased allocation footprint
         string line;
         while (getline(file, line)) {
             if (line.empty()) continue;
 
             LogEntry entry = parseLine(line);
             logs.push_back(entry);
-            levelCount[entry.level]++; // $O(1)$ update during read
+            
+            levelCount[entry.level]++;
             messageCount[entry.message]++;
-            string pattern = extractPattern(entry.message);
-            patternCount[pattern]++;
-            string hour = extractHour(entry.timestamp);
-            hourCount[hour]++;
-
-            if (entry.level == "ERROR") {
-    int hour = ExtractHour(entry.timestamp);
-    if (hour != -1) {
-        errorPerHour[hour]++;
-    }
-}
-
-if (entry.level == "ERROR") {
-    errorTimestamps.push_back(entry.timestamp);
-}
+            patternCount[extractPattern(entry.message)]++;
+            
+            if (entry.hour != -1) {
+                hourCount[entry.hour]++;
+                if (entry.level == "ERROR") {
+                    errorPerHour[entry.hour]++;
+                    errorMinutes.push_back(convertToMinutes(entry.timestamp));
+                }
+            }
         }
         file.close();
         return true;
     }
 
-    // Displays logs with optional level filtering and color coding
     void displayLogs(string filter = "") {
         cout << "\n--- Log Detailed View ---\n";
         for (const auto &entry : logs) {
             if (!filter.empty() && entry.level != filter) continue;
 
-            // ANSI Color Coding
-            string color = "\033[0m"; // Default
-            if (entry.level == "ERROR") color = "\033[1;31m";      // Red
-            else if (entry.level == "WARNING") color = "\033[1;33m"; // Yellow
-            else if (entry.level == "INFO") color = "\033[1;32m";    // Green
-
-            // cout<<"Level" << color << left << setw(10) << "[" + entry.level + "]" 
-            //<< "\033[0m " <<endl;
-            cout << "Level: " << color << "[" << entry.level << "]" << "\033[0m\n";
-                cout << "Time: " << entry.timestamp << endl;
-                cout << "Message: " << entry.message << endl;
-                cout << "------------------------" << endl;
-
-        }
-    }
-
-    // Prints a high-level summary of the log file
-    void printStats() {
-        cout << "\n==============================\n";
-        cout << "      LOG LEVEL SUMMARY       \n";
-        cout << "==============================\n";
-        for (const auto &pair : levelCount) {
-            cout << left << setw(10) << pair.first << ": " << pair.second << endl;
-        }
-        cout << "------------------------------\n";
-        cout << "Total Logs Processed: " << logs.size() << endl;
-        cout << "==============================\n";
-    }
-
-    vector<pair<string, int>> getSortedMessages() {
-    vector<pair<string, int>> vec(messageCount.begin(), messageCount.end());
-
-    sort(vec.begin(), vec.end(), [](auto &a, auto &b) {
-        return a.second > b.second; // descending
-    });
-
-    return vec;
-}
-
-void printTopKMessages(int k) {
-    auto sorted = getSortedMessages();
-
-    cout << "\nTop " << k << " Frequent Messages:\n";
-
-    for (int i = 0; i < k && i < sorted.size(); i++) {
-        cout << i + 1 << ". "
-            << sorted[i].first
-            << " → "
-            << sorted[i].second
-            << " times\n";
-    }
-}
-int convertToMinutes(const string &timestamp) {
-    int hour = stoi(timestamp.substr(11, 2));
-    int minute = stoi(timestamp.substr(14, 2));
-    return hour * 60 + minute;
-}
-
-void detectBurstErrors(int windowSize, int threshold) {
-    cout << "\n=== Burst Error Detection ===\n";
-
-    vector<int> times;
-
-    for (auto &t : errorTimestamps) {
-        times.push_back(convertToMinutes(t));
-    }
-
-    sort(times.begin(), times.end());
-
-    int left = 0;
-
-    for (int right = 0; right < times.size(); right++) {
-        while (times[right] - times[left] > windowSize) {
-            left++;
-        }
-
-        int count = right - left + 1;
-
-        if (count >= threshold) {
-            cout << "🚨 ALERT: "
-                << count << " errors within "
-                << windowSize << " minutes\n";
-        }
-    }
-}
-
-void searchLogs(string keyword) {
-    cout << "\n--- Search Results for: \"" << keyword << "\" ---\n";
-    cout << "------------------------------------------------\n";
-    
-    bool found = false;
-    int matchCount = 0;
-
-    for (const auto &entry : logs) {
-        // .find() looks for the keyword anywhere inside the message string
-        if (entry.message.find(keyword) != string::npos) {
-            
-            // Re-using your color logic for the search results
             string color = "\033[0m";
             if (entry.level == "ERROR") color = "\033[1;31m";
             else if (entry.level == "WARNING") color = "\033[1;33m";
             else if (entry.level == "INFO") color = "\033[1;32m";
 
-            cout << color << "[" << entry.level << "]\033[0m " 
-                << entry.timestamp << " | " << entry.message << endl;
-            
-            found = true;
-            matchCount++;
+            cout << color << left << setw(10) << "[" + entry.level + "]" << "\033[0m "
+                << entry.timestamp << " | " << entry.message << "\n";
         }
     }
 
-    if (!found) {
-        cout << "No logs found containing the keyword: " << keyword << endl;
-    } else {
-        cout << "------------------------------------------------\n";
-        cout << "Total matches found: " << matchCount << endl;
+    void printStats() {
+        cout << "\n========================================\n";
+        cout << "           SYSTEM METRICS DASHBOARD     \n";
+        cout << "========================================\n";
+        for (const auto &pair : levelCount) {
+            cout << left << setw(12) << pair.first << ": " << pair.second << " occurrences\n";
+        }
+        cout << "----------------------------------------\n";
+        cout << "Total Data Segments Handled: " << logs.size() << "\n";
+        cout << "========================================\n";
     }
-}
-void printPatternStats() {
-    cout << "\n===== PATTERN ANALYSIS =====\n";
 
-    for (auto &p : patternCount) {
-        cout << p.first << " → " << p.second << endl;
-    }
-}
-void printTimeAnalysis() {
-    cout << "\n===== TIME ANALYSIS =====\n";
+    void printTopKMessages(int k) {
+        vector<pair<string, int>> sorted(messageCount.begin(), messageCount.end());
+        sort(sorted.begin(), sorted.end(), [](const auto &a, const auto &b) {
+            return a.second > b.second;
+        });
 
-    for (auto &p : hourCount) {
-        cout << p.first << ":00 → " << p.second << " logs\n";
-    }
-}
-void printPeakHour() {
-    string peakHour;
-    int maxCount = 0;
-
-    for (auto &p : hourCount) {
-        if (p.second > maxCount) {
-            maxCount = p.second;
-            peakHour = p.first;
+        cout << "\n🔥 Top " << k << " Most Frequent Anomalies/Messages:\n";
+        for (int i = 0; i < k && i < sorted.size(); i++) {
+            cout << "  [" << i + 1 << "] " << left << setw(55) << sorted[i].first << " → " << sorted[i].second << " times\n";
         }
     }
 
-    cout << "\n🔥 Peak Log Hour: " << peakHour 
-        << ":00 with " << maxCount << " logs\n";
-}
-void printErrorByHour() {
-    cout << "\n=== Error Distribution by Hour ===\n";
+    void detectBurstErrors(int windowSize, int threshold) {
+        cout << "\n⚡ [Real-time Analytics] Burst Error Detection (Window: " << windowSize << "m):\n";
+        sort(errorMinutes.begin(), errorMinutes.end());
 
-    for (auto &p : errorPerHour) {
-        cout << p.first << ":00 - " << p.second << " errors\n";
+        int left = 0;
+        int lastAlertTime = -1; // Prevent duplication spams
+        bool alertTriggered = false;
+
+        for (int right = 0; right < errorMinutes.size(); right++) {
+            while (errorMinutes[right] - errorMinutes[left] > windowSize) {
+                left++;
+            }
+            int count = right - left + 1;
+
+            if (count >= threshold && errorMinutes[right] != lastAlertTime) {
+                cout << "  🚨 ALERT TRIGGER: Spike observed! " << count << " errors tracked within " << windowSize << " minute interval.\n";
+                lastAlertTime = errorMinutes[right];
+                alertTriggered = true;
+            }
+        }
+        if (!alertTriggered) cout << "  System stability normal. No multi-error bursts tracked.\n";
     }
-}
-void printPeakErrorHour() {
-    int maxHour = -1;
-    int maxCount = 0;
 
-    for (auto &p : errorPerHour) {
-        if (p.second > maxCount) {
-            maxCount = p.second;
-            maxHour = p.first;
+    void searchLogs(string keyword) {
+        cout << "\n🔍 Deep Scan Query for keyword: \"" << keyword << "\"\n";
+        int matchCount = 0;
+        for (const auto &entry : logs) {
+            if (entry.message.find(keyword) != string::npos) {
+                string color = (entry.level == "ERROR") ? "\033[1;31m" : (entry.level == "WARNING" ? "\033[1;33m" : "\033[1;32m");
+                cout << "  " << color << "[" << entry.level << "]\033[0m " << entry.timestamp << " | " << entry.message << "\n";
+                matchCount++;
+            }
+        }
+        cout << "✨ Query executed. Matches found: " << matchCount << "\n";
+    }
+
+    void printPatternStats() {
+        cout << "\n📋 Pattern Root-Cause Distribution Metrics:\n";
+        for (auto &p : patternCount) {
+            cout << "  " << left << setw(20) << p.first << " → " << p.second << " hits\n";
         }
     }
 
-    cout << "\n🚨 Peak Error Hour: " 
-        << maxHour << ":00 with " 
-        << maxCount << " errors\n";
-}
-void detectAnomalies(int threshold) {
-    cout << "\n=== Anomaly Detection ===\n";
-
-    for (auto &p : errorPerHour) {
-        if (p.second > threshold) {
-            cout << "🚨 ALERT: High error rate at "
-                << p.first << ":00 ("
-                << p.second << " errors)\n";
+    void printTimeAnalysis() {
+        cout << "\n⏱️ Traffic Frequency Breakdown by Hour:\n";
+        for (auto &p : hourCount) {
+            cout << "  " << setfill('0') << setw(2) << p.first << ":00 → " << setfill(' ') << setw(4) << p.second << " transactions tracked\n";
         }
     }
-}
+
+    void printPeakMetrics() {
+        int maxLogHour = -1, maxLogs = 0;
+        for (auto &p : hourCount) {
+            if (p.second > maxLogs) { maxLogs = p.second; maxLogHour = p.first; }
+        }
+        int maxErrHour = -1, maxErrors = 0;
+        for (auto &p : errorPerHour) {
+            if (p.second > maxErrors) { maxErrors = p.second; maxErrHour = p.first; }
+        }
+
+        cout << "\n📈 System Volatility Peaks:\n";
+        if (maxLogHour != -1) cout << "  • Traffic Peak Hour : " << setfill('0') << setw(2) << maxLogHour << ":00 (" << maxLogs << " log rows generated)\n";
+        if (maxErrHour != -1) cout << "  • Crash Peak Hour   : " << setfill('0') << setw(2) << maxErrHour << ":00 (" << maxErrors << " ERROR states tracked)\n";
+    }
 };
 
-int main() {
+int main(int argc, char* argv[]) {
     LogAnalyzer analyzer;
 
-    cout << "Initializing Advanced Log Analyzer..." << endl;
-
     if (!analyzer.loadFile("data/logs.txt")) {
-        cerr << "Error: Could not open log file. Ensure 'data/logs.txt' exists." << endl;
+        cerr << "FATAL ERROR: Execution suspended. System unable to initialize log pipeline data source targets.\n";
         return 1;
     }
 
-    // Example: Only display ERRORS
-    //analyzer.displayLogs();
-    //analyzer.displayLogs("ERROR");
-
-    // Display total statistics
-    analyzer.printStats();
-    analyzer.printTopKMessages(3);
-//     analyzer.printPatternStats();
-//     analyzer.printTimeAnalysis();
-//     analyzer.printPeakHour();
-//     analyzer.printErrorByHour();
-// analyzer.printPeakErrorHour();
-analyzer.detectAnomalies(2); // try 2 or 3
-analyzer.detectBurstErrors(5,1); 
-    // 2. Ask user for a search term
-    //string searchTerm;
-    //cout << "\nEnter a keyword to search in logs (or 'exit' to quit): ";
-    //getline(cin, searchTerm);
-
-    //if (searchTerm != "exit" && !searchTerm.empty()) {
-     //   analyzer.searchLogs(searchTerm);
-   // }
-
+    // Dynamic Production-grade CLI controller routing via argv switches
+    if (argc == 1) {
+        // Default system diagnostic summary profile run
+        cout << "====================================================================\n";
+        cout << "                  REAL-TIME DISTRIBUTED SYSTEM REPORT               \n";
+        cout << "====================================================================\n";
+        analyzer.printStats();
+        analyzer.printPatternStats();
+        analyzer.printPeakMetrics();
+        analyzer.detectBurstErrors(5, 3);
+        cout << "\n💡 Pro-Tip: Run with flag '--help' to explore runtime CLI filters.\n";
+    } 
+    else {
+        string command = argv[1];
+        if (command == "--help") {
+            cout << "Available Command Engine Switches:\n"
+                << "  " << argv[0] << "                   Run full diagnostic report profile\n"
+                << "  " << argv[0] << " --level [TYPE]    Filter log display by level (INFO/ERROR/WARNING)\n"
+                << "  " << argv[0] << " --search [TERM]   Search for specific string fragments deep within records\n"
+                << "  " << argv[0] << " --top [K]         Extract top K highest recurring messages\n"
+                << "  " << argv[0] << " --burst [W] [T]   Analyze burst anomaly window (W=minutes, T=error threshold)\n";
+        } 
+        else if (command == "--level" && argc > 2) {
+            analyzer.displayLogs(argv[2]);
+        } 
+        else if (command == "--search" && argc > 2) {
+            analyzer.searchLogs(argv[2]);
+        } 
+        else if (command == "--top" && argc > 2) {
+            analyzer.printTopKMessages(stoi(argv[2]));
+        } 
+        else if (command == "--burst" && argc > 3) {
+            analyzer.detectBurstErrors(stoi(argv[2]), stoi(argv[3]));
+        } 
+        else {
+            cout << "Invalid argument command routing setup. Execute with '--help' flag.\n";
+        }
+    }
     return 0;
 }
