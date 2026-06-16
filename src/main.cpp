@@ -81,6 +81,7 @@ private:
         return hour * 60 + minute;
     }
 
+
 public:
     bool loadFile(const string &filename) {
         ifstream file(filename);
@@ -213,6 +214,39 @@ public:
         if (maxLogHour != -1) cout << "  • Traffic Peak Hour : " << setfill('0') << setw(2) << maxLogHour << ":00 (" << maxLogs << " log rows generated)\n";
         if (maxErrHour != -1) cout << "  • Crash Peak Hour   : " << setfill('0') << setw(2) << maxErrHour << ":00 (" << maxErrors << " ERROR states tracked)\n";
     }
+
+    void exportToCSV(const string &outputFilename = "report.csv") {
+    ofstream csvFile(outputFilename);
+    if (!csvFile.is_open()) {
+        cerr << "Error: Unable to generate CSV report target.\n";
+        return;
+    }
+
+    // 1. Write Header Row
+    csvFile << "Metric Type,Key/Identifier,Value/Count\n";
+
+    // 2. Export Log Level Distribution
+    for (const auto &pair : levelCount) {
+        csvFile << "Log Level," << pair.first << "," << pair.second << "\n";
+    }
+
+    // 3. Export Pattern Roots
+    for (const auto &p : patternCount) {
+        csvFile << "Root Cause Pattern," << p.first << "," << p.second << "\n";
+    }
+
+    // 4. Export Peak Volatility Times
+    int maxLogHour = -1, maxLogs = 0;
+    for (const auto &p : hourCount) {
+        if (p.second > maxLogs) { maxLogs = p.second; maxLogHour = p.first; }
+    }
+    if (maxLogHour != -1) {
+        csvFile << "System Peak,Traffic Peak Hour," << maxLogHour << ":00\n";
+    }
+
+    csvFile.close();
+    cout << "📊 System report exported successfully to " << outputFilename << "\n";
+}
 };
 
 int main(int argc, char* argv[]) {
@@ -233,6 +267,9 @@ int main(int argc, char* argv[]) {
         analyzer.printPatternStats();
         analyzer.printPeakMetrics();
         analyzer.detectBurstErrors(5, 3);
+
+        analyzer.exportToCSV("report.csv");
+
         cout << "\n💡 Pro-Tip: Run with flag '--help' to explore runtime CLI filters.\n";
     } 
     else {
