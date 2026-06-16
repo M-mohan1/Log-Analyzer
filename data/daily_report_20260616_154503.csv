@@ -1,0 +1,14 @@
+Metric Type,Key/Identifier,Value/Count
+Log Level,WARNING,9
+Log Level,INFO,26
+Log Level,ERROR,12
+Root Cause Pattern,network issue,1
+Root Cause Pattern,security event,2
+Root Cause Pattern,backup process,3
+Root Cause Pattern,database issue,6
+Root Cause Pattern,memory issue,2
+Root Cause Pattern,login activity,2
+Root Cause Pattern,cpu issue,1
+Root Cause Pattern,other,26
+Root Cause Pattern,disk issue,4
+System Peak,Traffic Peak Hour,16:00
