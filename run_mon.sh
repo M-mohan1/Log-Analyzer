@@ -35,3 +35,4 @@ else
 fi
 
 echo "💤 Execution sequence ended. Entering standby mode."
+echo "" # <--- ADD THIS LINE TO FORCE A NEWLINE FOR THE NEXT CRON RUN
