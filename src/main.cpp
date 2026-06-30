@@ -1,5 +1,3 @@
-
-
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -9,6 +7,17 @@
 #include <algorithm>
 
 using namespace std;
+
+// Safe int parse: returns fallback instead of crashing on bad input
+int safeStoi(const string &s, int fallback = -1) {
+    try {
+        size_t pos;
+        int val = stoi(s, &pos);
+        return val;
+    } catch (...) {
+        return fallback;
+    }
+}
 
 struct LogEntry {
     string level;
@@ -45,7 +54,8 @@ private:
             entry.timestamp = line.substr(timeStart, 19);
             
             // Fast inline extraction of hour to eliminate double parsing functions
-            entry.hour = stoi(entry.timestamp.substr(11, 2));
+            entry.hour = safeStoi(entry.timestamp.substr(11, 2), -1);
+            if (entry.hour < 0 || entry.hour > 23) entry.hour = -1; // reject malformed hour
 
             size_t msgStart = line.find_first_not_of(" ", timeStart + 19);
             if (msgStart != string::npos) {
@@ -76,8 +86,8 @@ private:
     }
 
     int convertToMinutes(const string &timestamp) {
-        int hour = stoi(timestamp.substr(11, 2));
-        int minute = stoi(timestamp.substr(14, 2));
+        int hour = safeStoi(timestamp.substr(11, 2), 0);
+        int minute = safeStoi(timestamp.substr(14, 2), 0);
         return hour * 60 + minute;
     }
 
@@ -252,8 +262,18 @@ public:
 int main(int argc, char* argv[]) {
     LogAnalyzer analyzer;
 
-    if (!analyzer.loadFile("data/logs.txt")) {
-        cerr << "FATAL ERROR: Execution suspended. System unable to initialize log pipeline data source targets.\n";
+    // Default file path, overridable with --file <path>
+    string logFilePath = "data/logs.txt";
+    for (int i = 1; i < argc - 1; i++) {
+        if (string(argv[i]) == "--file") {
+            logFilePath = argv[i + 1];
+            break;
+        }
+    }
+
+    if (!analyzer.loadFile(logFilePath)) {
+        cerr << "FATAL ERROR: Could not open log file '" << logFilePath
+            << "'. Use --file <path> to specify a different location.\n";
         return 1;
     }
 
@@ -277,11 +297,23 @@ int main(int argc, char* argv[]) {
         if (command == "--help") {
             cout << "Available Command Engine Switches:\n"
                 << "  " << argv[0] << "                   Run full diagnostic report profile\n"
+                << "  " << argv[0] << " --file [PATH]     Specify a log file path (default: data/logs.txt)\n"
                 << "  " << argv[0] << " --level [TYPE]    Filter log display by level (INFO/ERROR/WARNING)\n"
                 << "  " << argv[0] << " --search [TERM]   Search for specific string fragments deep within records\n"
                 << "  " << argv[0] << " --top [K]         Extract top K highest recurring messages\n"
                 << "  " << argv[0] << " --burst [W] [T]   Analyze burst anomaly window (W=minutes, T=error threshold)\n";
         } 
+        else if (command == "--file") {
+            // Already consumed above to load the file; just run default report.
+            cout << "====================================================================\n";
+            cout << "                  REAL-TIME DISTRIBUTED SYSTEM REPORT               \n";
+            cout << "====================================================================\n";
+            analyzer.printStats();
+            analyzer.printPatternStats();
+            analyzer.printPeakMetrics();
+            analyzer.detectBurstErrors(5, 3);
+            analyzer.exportToCSV("report.csv");
+        }
         else if (command == "--level" && argc > 2) {
             analyzer.displayLogs(argv[2]);
         } 
@@ -289,10 +321,22 @@ int main(int argc, char* argv[]) {
             analyzer.searchLogs(argv[2]);
         } 
         else if (command == "--top" && argc > 2) {
-            analyzer.printTopKMessages(stoi(argv[2]));
+            int k = safeStoi(argv[2], -1);
+            if (k <= 0) {
+                cerr << "Error: --top requires a positive integer (got '" << argv[2] << "').\n";
+                return 1;
+            }
+            analyzer.printTopKMessages(k);
         } 
         else if (command == "--burst" && argc > 3) {
-            analyzer.detectBurstErrors(stoi(argv[2]), stoi(argv[3]));
+            int window = safeStoi(argv[2], -1);
+            int threshold = safeStoi(argv[3], -1);
+            if (window <= 0 || threshold <= 0) {
+                cerr << "Error: --burst requires two positive integers (window, threshold). Got '"
+                    << argv[2] << "' and '" << argv[3] << "'.\n";
+                return 1;
+            }
+            analyzer.detectBurstErrors(window, threshold);
         } 
         else {
             cout << "Invalid argument command routing setup. Execute with '--help' flag.\n";
